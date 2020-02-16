@@ -6,10 +6,11 @@ import pandas as pd
 import numpy as np
 from scipy.special import expit
 from sklearn.preprocessing import normalize
-import spacy
 from time import time
 import pickle
 from numpy.linalg import norm # for computing similarity
+from multiprocessing import Pool # for multiprocessing
+import string
 
 import warnings
 warnings.filterwarnings("error")
@@ -17,6 +18,8 @@ warnings.filterwarnings("error")
 
 __authors__ = ['Mewe-Hezoudah KAHANAM','Mouad BOUCHATTAOUI']
 __emails__  = ['mewe-hezoudah.kahanam@student.ecp.fr','mouad.bouchattaoui@student.ecp.fr']
+
+translator = str.maketrans('', '', string.punctuation)
 
 # decorator for printing code execution time
 def executionTime(input_func):
@@ -28,21 +31,31 @@ def executionTime(input_func):
 		return result
 	return wrapper
 
-@executionTime
-def text2sentences(path):
-	nlp = spacy.load("en_core_web_sm")
-	# feel free to make a better tokenization/pre-processing
+
+def lines_to_tuple(lines):
 	sentences = []
+	for l in lines:
+		sentence = l.lower().translate(translator)
+		sentences.append(tuple(sentence.split()))
+	return sentences
+
+
+@executionTime
+def text2sentences(path, n_jobs=3):
+	# feel free to make a better tokenization/pre-processing
 	with open(path) as f:
 		lines = f.readlines()
 	
 	# this approche increases speed by 10s
-	for l in lines:
-		doc = nlp(l.lower())
-		no_punc_sentence = [token.orth_ for token in doc if not token.is_punct | token.is_space]
-		sentences.append(tuple(no_punc_sentence))
+	chunks = [lines[i::n_jobs] for i in range(n_jobs)]
+	pool = Pool(processes=n_jobs)
+
+	result = pool.map(lines_to_tuple, chunks)
+	pool.close() # close the processes
+	sentences = sum(result, []) # merge the results of all processes
 	
 	return sentences
+
 
 def loadPairs(path):
 	data = pd.read_csv(path, delimiter='\t')
@@ -77,6 +90,9 @@ class SkipGram:
 			count_map = map(lambda sentence: sentence.count(word), self.trainset)
 			counts[word_idx] = sum(count_map)
 		self.scores = np.power(counts, alpha) / np.sum(np.power(counts, alpha))
+
+		# one hot encoding
+		self.one_hot = np.eye(len(self.vocab))
 
 	def initialize(self, low=-0.8, high=-0.8, learn_rate=0.01):
 		"""Initializing the model parameters using uniform random law.
@@ -113,11 +129,12 @@ class SkipGram:
 		negative_words = np.random.choice(vocab_size, size=self.negativeRate, replace=False, p=scores)
 		return list(negative_words)
 
-	def train(self, epoch=2, learn_rate=0.01, low=-0.8, high=0.8, initialize=True):
+	def train(self, epoch=2, batch_size=32, learn_rate=0.01, low=-0.8, high=0.8, initialize=True):
 		"""Training our model
 		
 		Keyword Arguments:
 			epoch {int} -- number of epoch for the training (default: {10})
+			batch_size {int} -- batches for the training (default: {10})
 			learn_rate {float} -- learning rate for the optimization (default: {0.01})
 			low {float} -- lower bound for parameters value (default: {-0.8})
 			high {float} -- upper bound for parameters value (default: {0.8})
@@ -136,17 +153,21 @@ class SkipGram:
 
 				for wpos, word in enumerate(sentence):
 					wIdx = self.w2id[word]
-					winsize = np.random.randint(self.winSize) + 1
+					winsize = self.winSize // 2
 					start = max(0, wpos - winsize)
 					end = min(wpos + winsize + 1, len(sentence))
+					ctxIds = list({ self.w2id[w] for w in sentence[start:end] if self.w2id[w] != wIdx })
+					negativeIds = [self.sample({wIdx, ctxtId}) for ctxId in ctxIds]
+
+					c = self.one_hot[ctx]
+					n = np.zeros((len(ctx), self.negativeRate, self.nEmbed))
 					
-					for context_word in sentence[start:end]:
-						ctxtId = self.w2id[context_word]
-						if ctxtId == wIdx: continue
+					for idx, ctxtId in enumerate(ctx):
 						negativeIds = self.sample({wIdx, ctxtId})
-						self.trainWord(wIdx, ctxtId, negativeIds)
-						self.trainWords += 1
-					self.target += 10**-6
+						n[idx,:,:] = self.context[negativeIds]
+						print(n[idx,:,:])
+						# self.trainWord(wIdx, ctxtId, negativeIds)
+						# self.trainWords += 1
 
 				if counter % 1000 == 0:
 					print(' > training %d of %d' % (counter, len(self.trainset)))
