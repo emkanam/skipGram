@@ -87,6 +87,17 @@ class SkipGram:
 			count_map = map(lambda sentence: sentence.count(word), self.trainset)
 			counts[word_idx] = sum(count_map)
 		self.scores = np.power(counts, alpha) / np.sum(np.power(counts, alpha))
+
+	def initialize(self, low=-0.8, high=-0.8):
+		# initialize trainig metrics
+		self.trainWords = 0
+		self.accLoss = 0
+		self.loss = []
+
+		# initialize target and context matrices
+		vocab_size = len(self.vocab)
+		self.target = np.random.uniform(low, high, (vocab_size, self.nEmbed))
+		self.context = np.random.uniform(low, high, (vocab_size, self.nEmbed))
 	
 	def sample(self, omit):
 		"""samples negative words, ommitting those in set omit"""
@@ -100,7 +111,14 @@ class SkipGram:
 		negative_words = np.random.choice(vocab_size, size=self.negativeRate, replace=False, p=scores)
 		return list(negative_words)
 
-	def train(self):
+	def train(self, epoch=10, learn_rate=0.01):
+		"""Training our model
+		
+		Keyword Arguments:
+			epoch {int} -- number of epoch for the training (default: {10})
+			learn_rate {float} -- learning rate for the optimization (default: {0.01})
+		"""
+
 		self.trainWords = 0
 		self.accLoss = 0
 		self.loss = []
