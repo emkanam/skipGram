@@ -9,9 +9,7 @@ from sklearn.preprocessing import normalize
 import spacy
 from time import time
 import pickle
-from scipy.spatial.distance import cosine
-from numpy.linalg import norm
-from sklearn.preprocessing import scale
+from numpy.linalg import norm # for computing similarity
 
 import warnings
 warnings.filterwarnings("error")
@@ -37,15 +35,7 @@ def text2sentences(path):
 	sentences = []
 	with open(path) as f:
 		lines = f.readlines()
-		# for l in f:
-		# 	st = time()
-		# 	doc = nlp(l.lower())
-		# 	# no_punc_sentence = [token.orth_ for token in doc if not token.is_punct | token.is_space]
-		# 	no_punc_sentence = filter(lambda token : not(token.is_punct or token.is_space), doc)
-		# 	# no_punc_sentence = map(lambda token : token.orth_, no_punc_sentence)
-		# 	sentences.append( tuple(no_punc_sentence) )
-		# 	ed = time()
-		# 	print(ed - st)
+	
 	# this approche increases speed by 10s
 	for l in lines:
 		doc = nlp(l.lower())
@@ -88,16 +78,18 @@ class SkipGram:
 			counts[word_idx] = sum(count_map)
 		self.scores = np.power(counts, alpha) / np.sum(np.power(counts, alpha))
 
-	def initialize(self, low=-0.8, high=-0.8):
+	def initialize(self, low=-0.8, high=-0.8, learn_rate=0.01):
 		"""Initializing the model parameters using uniform random law.
 		The values are also normalized using a min-max normalization.
 		
 		Keyword Arguments:
 			low {float} -- lower bound for parameters value (default: {-0.8})
 			high {float} -- upper bound for parameters value (default: {0.8})
+			learn_rate {float} -- learning rate for the optimization (default: {0.01})
 		"""
-		
+
 		# initialize trainig metrics
+		self.learn_rate = learn_rate
 		self.trainWords = 0
 		self.accLoss = 0
 		self.loss = []
@@ -106,8 +98,8 @@ class SkipGram:
 		vocab_size = len(self.vocab)
 		self.target = np.random.uniform(low, high, (vocab_size, self.nEmbed))
 		self.context = np.random.uniform(low, high, (vocab_size, self.nEmbed))
-		self.target = normalize(self.target, norm='max', axis=1)
-		self.context = normalize(self.context, norm='max', axis=1)
+		self.target = normalize(self.target)
+		self.context = normalize(self.context)
 	
 	def sample(self, omit):
 		"""samples negative words, ommitting those in set omit"""
@@ -121,7 +113,7 @@ class SkipGram:
 		negative_words = np.random.choice(vocab_size, size=self.negativeRate, replace=False, p=scores)
 		return list(negative_words)
 
-	def train(self, epoch=10, learn_rate=0.01, low=-0.8, high=0.8, initialize=False):
+	def train(self, epoch=2, learn_rate=0.01, low=-0.8, high=0.8, initialize=True):
 		"""Training our model
 		
 		Keyword Arguments:
@@ -129,75 +121,85 @@ class SkipGram:
 			learn_rate {float} -- learning rate for the optimization (default: {0.01})
 			low {float} -- lower bound for parameters value (default: {-0.8})
 			high {float} -- upper bound for parameters value (default: {0.8})
-			initialize {bool} -- if we want to initialize the parameters (default: {False})
+			initialize {bool} -- if we want to initialize the parameters (default: {True})
 		"""
 
 		# if we want to initialize the model parameters
 		if initialize:
-			self.initialize(low=low, high=high)
+			self.initialize(low=low, high=high, learn_rate=learn_rate)
 
-		for counter, sentence in enumerate(self.trainset):
-			sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
+		# train on epoch
+		for ne in range(epoch):
+			t=time()
+			for counter, sentence in enumerate(self.trainset):
+				sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
 
-			for wpos, word in enumerate(sentence):
-				wIdx = self.w2id[word]
-				winsize = np.random.randint(self.winSize) + 1
-				start = max(0, wpos - winsize)
-				end = min(wpos + winsize + 1, len(sentence))
-				t=time()
-				for context_word in sentence[start:end]:
-					ctxtId = self.w2id[context_word]
-					if ctxtId == wIdx: continue
-					# train on n_epoch
-					for _ in range(20):
+				for wpos, word in enumerate(sentence):
+					wIdx = self.w2id[word]
+					winsize = np.random.randint(self.winSize) + 1
+					start = max(0, wpos - winsize)
+					end = min(wpos + winsize + 1, len(sentence))
+					
+					for context_word in sentence[start:end]:
+						ctxtId = self.w2id[context_word]
+						if ctxtId == wIdx: continue
 						negativeIds = self.sample({wIdx, ctxtId})
 						self.trainWord(wIdx, ctxtId, negativeIds)
 						self.trainWords += 1
-				e = time()
-				print("time : %f"%(e-t))
+					self.target += 10**-6
 
-			if counter % 1000 == 0:
-				print(' > training %d of %d' % (counter, len(self.trainset)))
-				self.loss.append(self.accLoss / self.trainWords)
-				self.trainWords = 0
-				self.accLoss = 0.
+				if counter % 1000 == 0:
+					print(' > training %d of %d' % (counter, len(self.trainset)))
+					self.loss.append(self.accLoss / self.trainWords)
+					self.trainWords = 0
+					self.accLoss = 0.
+			
+			self.learn_rate = 1/( ( 1+self.learn_rate*(1+ne) ) ) 
+			e = time()
+			print("time : %f"%(e-t))
 
 	def trainWord(self, wordId, contextId, negativeIds):
-		learn_rate = 0.01
+		alpha = 0.1
 		c = self.context[contextId]
 		t = self.target[wordId]
 		n = self.context[negativeIds]
 		
+		# compute the grad
+		grad_c = -( 1-expit(alpha*np.dot(c,t)) )*t
+		grad_t = -( 1-expit(alpha*np.dot(c,t)) )*c + np.sum( ( 1 - expit(-alpha*np.dot(t,n.T)) )*n.T, 1)
+		
+		# update weights
+		self.context[contextId] = c - self.learn_rate*alpha*grad_c
+		self.target[wordId] = t - self.learn_rate*alpha*grad_t
+
 		# compute the loss
 		loss = np.log( 1 + np.exp(-np.dot(c,t)) ) + np.sum( np.log( 1 + np.exp(np.dot(t,n.T)) ) )
 		self.accLoss += loss
-		# compute the grad
-		grad_c = -(1-expit(np.dot(c,t)))*t
-		grad_t = -((1-expit(np.dot(c,t)))*c + np.sum( (1 - expit(-np.dot(t,n.T)))*n.T, 1))
-		# print(grad_c)
-		# update weights
-		self.context[contextId] = c - learn_rate*grad_c
-		self.target[wordId] = t - learn_rate*grad_t
 
 	def save(self,path):
 		with open(path, 'wb') as output:
 			pickle.dump(self, output, pickle.HIGHEST_PROTOCOL)
 
 	def similarity(self,word1,word2):
+		"""Computes similarity between two words. Unknown words are mapped to <unk> embedding vector.
+		the similarity is computed by : \alpha_{w_1, w_2} = \frac{1 + \cos(w_1,w_2)}{2} 
+		
+		Arguments:
+			word1 {string} -- first word
+			word2 {string} -- second word
+		
+		Returns:
+			float -- a score \in [0,1] indicating the similarity (the higher the more similar)
 		"""
-		computes similiarity between the two words. unknown words are mapped to one common vector
-		:param word1:
-		:param word2:
-		:return: a float \in [0,1] indicating the similarity (the higher the more similar)
-		"""
-		word_id = lambda word: self.w2id[word] if word in self.vocab else self.w2id['<unk>']
-		# get the ids
-		word1_id = word_id(word1)
-		word2_id = word_id(word2)
-		embed1 = self.target[word1_id]
-		embed2 = self.target[word2_id]
 
-		score = np.dot(embed1, embed2) / (norm(embed1) * norm(embed2))
+		# create a function to get word id return id of <unk> if word not in vocab
+		word_id = lambda word: self.w2id[word] if word in self.vocab else self.w2id['<unk>']
+
+		# get the embeddings
+		w1 = self.target[word_id(word1)]
+		w2 = self.target[word_id(word2)]
+
+		score = ( 1 + np.dot(w1, w2) / (norm(w1) * norm(w2)) ) / 2.0
 		score = round(score, 4)
 
 		# print("%s -- %s == %f"%(self.vocab[word1_id], self.vocab[word2_id], score))
