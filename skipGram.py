@@ -89,6 +89,14 @@ class SkipGram:
 		self.scores = np.power(counts, alpha) / np.sum(np.power(counts, alpha))
 
 	def initialize(self, low=-0.8, high=-0.8):
+		"""Initializing the model parameters using uniform random law.
+		The values are also normalized using a min-max normalization.
+		
+		Keyword Arguments:
+			low {float} -- lower bound for parameters value (default: {-0.8})
+			high {float} -- upper bound for parameters value (default: {0.8})
+		"""
+		
 		# initialize trainig metrics
 		self.trainWords = 0
 		self.accLoss = 0
@@ -98,6 +106,8 @@ class SkipGram:
 		vocab_size = len(self.vocab)
 		self.target = np.random.uniform(low, high, (vocab_size, self.nEmbed))
 		self.context = np.random.uniform(low, high, (vocab_size, self.nEmbed))
+		self.target = normalize(self.target, norm='max', axis=1)
+		self.context = normalize(self.context, norm='max', axis=1)
 	
 	def sample(self, omit):
 		"""samples negative words, ommitting those in set omit"""
@@ -111,25 +121,20 @@ class SkipGram:
 		negative_words = np.random.choice(vocab_size, size=self.negativeRate, replace=False, p=scores)
 		return list(negative_words)
 
-	def train(self, epoch=10, learn_rate=0.01):
+	def train(self, epoch=10, learn_rate=0.01, low=-0.8, high=0.8, initialize=False):
 		"""Training our model
 		
 		Keyword Arguments:
 			epoch {int} -- number of epoch for the training (default: {10})
 			learn_rate {float} -- learning rate for the optimization (default: {0.01})
+			low {float} -- lower bound for parameters value (default: {-0.8})
+			high {float} -- upper bound for parameters value (default: {0.8})
+			initialize {bool} -- if we want to initialize the parameters (default: {False})
 		"""
 
-		self.trainWords = 0
-		self.accLoss = 0
-		self.loss = []
-		# initialize target and context matrices
-		vocab_size = len(self.vocab)
-		self.target = np.random.uniform(-0.8, 0.8, (vocab_size, self.nEmbed))
-		self.context = np.random.uniform(-0.8, 0.8, (vocab_size, self.nEmbed))
-		# self.target = np.random.random_sample(size=(vocab_size, self.nEmbed))
-		# self.context = np.random.random_sample(size=(vocab_size, self.nEmbed))
-		# self.target = normalize(self.target, norm='max', axis=1)
-		# self.context = normalize(self.context, norm='max', axis=1)
+		# if we want to initialize the model parameters
+		if initialize:
+			self.initialize(low=low, high=high)
 
 		for counter, sentence in enumerate(self.trainset):
 			sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
