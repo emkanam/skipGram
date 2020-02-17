@@ -129,7 +129,27 @@ class SkipGram:
 		negative_words = np.random.choice(vocab_size, size=self.negativeRate, replace=False, p=scores)
 		return list(negative_words)
 
-	def train(self, epoch=2, batch_size=32, learn_rate=0.01, low=-0.8, high=0.8, initialize=True):
+	def get_train_data(self, sentence):
+		sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
+		wIds = list()
+		negativeIds = list()
+		ctxtIds = list()
+
+		for wpos, word in enumerate(sentence):
+			wIdx = self.w2id[word]
+			winsize = self.winSize // 2
+			start = max(0, wpos - winsize)
+			end = min(wpos + winsize + 1, len(sentence))
+			ctxtIds_ = [ self.w2id[w] for w in sentence[start:end] if self.w2id[w] != wIdx ]
+			if len(ctxtIds_) == 0: continue # avoid sentences with all <unk>
+			wIds.append(wIdx)
+			negativeIds.append([self.sample({wIdx, ctxtId}) for ctxtId in ctxtIds_])
+			ctxtIds.append(ctxtIds_)
+		
+		return wIds, ctxtIds, negativeIds
+
+
+	def train(self, epoch=2, learn_rate=0.01, low=-0.8, high=0.8, initialize=True):
 		"""Training our model
 		
 		Keyword Arguments:
@@ -147,28 +167,21 @@ class SkipGram:
 
 		# train on epoch
 		for ne in range(epoch):
+			t=time()
 			for counter, sentence in enumerate(self.trainset):
-				sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
-				t=time()
-				for wpos, word in enumerate(sentence):
-					wIdx = self.w2id[word]
-					winsize = self.winSize // 2
-					start = max(0, wpos - winsize)
-					end = min(wpos + winsize + 1, len(sentence))
-					ctxtIds = list({ self.w2id[w] for w in sentence[start:end] if self.w2id[w] != wIdx })
-					if len(ctxtIds) == 0: continue # avoid sentences with all <unk>
-					negativeIds = [self.sample({wIdx, ctxtId}) for ctxtId in ctxtIds]
-					# train all the context words at once
-					self.trainWord(wIdx, ctxtIds, negativeIds)
-					self.trainWords += len(ctxtIds)
-				e = time()
-				print("time : %f"%(e-t))
+				wIdxs, ctxtIds, negativeIds = self.get_train_data(sentence)
+				print(len(wIdxs), len(ctxtIds), len(negativeIds))
+				# train all the target-context words at once
+				# self.trainWord(wIdxs, ctxtIds, negativeIds)
+				# self.trainWords += len(ctxtIds)
 
 				if counter % 1000 == 0:
 					print(' > training %d of %d' % (counter, len(self.trainset)))
-					self.loss.append(self.accLoss / self.trainWords)
+					# self.loss.append(self.accLoss / self.trainWords)
 					self.trainWords = 0
 					self.accLoss = 0.
+			e = time()
+			print("time : %f"%(e-t))
 			
 			self.learn_rate = 1/( ( 1+self.learn_rate*(1+ne) ) ) 
 
