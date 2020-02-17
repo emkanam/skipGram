@@ -147,27 +147,22 @@ class SkipGram:
 
 		# train on epoch
 		for ne in range(epoch):
-			t=time()
 			for counter, sentence in enumerate(self.trainset):
 				sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
-
+				t=time()
 				for wpos, word in enumerate(sentence):
 					wIdx = self.w2id[word]
 					winsize = self.winSize // 2
 					start = max(0, wpos - winsize)
 					end = min(wpos + winsize + 1, len(sentence))
-					ctxIds = list({ self.w2id[w] for w in sentence[start:end] if self.w2id[w] != wIdx })
-					negativeIds = [self.sample({wIdx, ctxtId}) for ctxId in ctxIds]
-
-					c = self.one_hot[ctx]
-					n = np.zeros((len(ctx), self.negativeRate, self.nEmbed))
-					
-					for idx, ctxtId in enumerate(ctx):
-						negativeIds = self.sample({wIdx, ctxtId})
-						n[idx,:,:] = self.context[negativeIds]
-						print(n[idx,:,:])
-						# self.trainWord(wIdx, ctxtId, negativeIds)
-						# self.trainWords += 1
+					ctxtIds = list({ self.w2id[w] for w in sentence[start:end] if self.w2id[w] != wIdx })
+					if len(ctxtIds) == 0: continue # avoid sentences with all <unk>
+					negativeIds = [self.sample({wIdx, ctxtId}) for ctxtId in ctxtIds]
+					# train all the context words at once
+					self.trainWord(wIdx, ctxtIds, negativeIds)
+					self.trainWords += len(ctxtIds)
+				e = time()
+				print("time : %f"%(e-t))
 
 				if counter % 1000 == 0:
 					print(' > training %d of %d' % (counter, len(self.trainset)))
@@ -176,26 +171,34 @@ class SkipGram:
 					self.accLoss = 0.
 			
 			self.learn_rate = 1/( ( 1+self.learn_rate*(1+ne) ) ) 
-			e = time()
-			print("time : %f"%(e-t))
 
-	def trainWord(self, wordId, contextId, negativeIds):
+	def trainWord(self, wordId, contextIds, negativeIds):
 		alpha = 0.1
-		c = self.context[contextId]
 		t = self.target[wordId]
-		n = self.context[negativeIds]
+
+		c = np.dot(self.one_hot[contextIds], self.context)
+		n = np.zeros((len(c), self.negativeRate, self.nEmbed))
+					
+		for i in range(len(c)):
+			n[i,:,:] = self.context[negativeIds[i]]
 		
+		
+		k = self.nEmbed
+		l = len(c)
+		m = self.negativeRate
 		# compute the grad
-		grad_c = -( 1-expit(alpha*np.dot(c,t)) )*t
-		grad_t = -( 1-expit(alpha*np.dot(c,t)) )*c + np.sum( ( 1 - expit(-alpha*np.dot(t,n.T)) )*n.T, 1)
+		v_ct = -( 1-expit(alpha*np.dot(c,t)) )
+		v_nt = 1 - expit( -alpha*np.dot( t, n.reshape((l,k,-1)) ) )
+		grad_c = v_ct.reshape(-1,1)*t.reshape(1,-1)
+		grad_t = np.dot(v_ct, c) + np.sum(np.einsum('ij,ijk->jk', v_nt,n), 0)
 		
 		# update weights
-		self.context[contextId] = c - self.learn_rate*alpha*grad_c
+		self.context[contextIds] = c - self.learn_rate*alpha*grad_c
 		self.target[wordId] = t - self.learn_rate*alpha*grad_t
 
 		# compute the loss
-		loss = np.log( 1 + np.exp(-np.dot(c,t)) ) + np.sum( np.log( 1 + np.exp(np.dot(t,n.T)) ) )
-		self.accLoss += loss
+		# loss = np.log( 1 + np.exp(-np.dot(c,t)) ) + np.sum( np.log( 1 + np.exp(np.dot(t,n.T)) ) )
+		self.accLoss += 0
 
 	def save(self,path):
 		with open(path, 'wb') as output:
