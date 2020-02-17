@@ -185,7 +185,6 @@ class SkipGram:
 			self.learn_rate = 1/( ( 1+self.learn_rate*(1+ne) ) ) 
 
 	def trainSentence(self, wordIds, contextIds, negativeIds):
-		k = self.nEmbed
 		m = self.negativeRate
 		lr = self.learn_rate
 
@@ -195,44 +194,16 @@ class SkipGram:
 			c = self.context[contextIds[pos]]
 			n = np.array([self.context[e] for e in negativeIds[pos]])
 			
-			for _ in range(10):
+			for _ in range(1):
 				v_ct = expit(np.dot(c,t))
 				v_nt = expit(-np.dot(n,t))
-				loss = -np.sum(np.log(v_ct) + np.sum(np.log(v_nt),1))
+				self.accLoss += -np.sum(np.log(v_ct) + np.sum(np.log(v_nt),1))
+				self.trainWords += 1
 
 				grad_t = np.sum( (v_ct - 1).reshape(l,1)*c + np.sum( (1 - v_nt).reshape(l,m,1)*n, 1), 0)
 				grad_c = v_ct.reshape(l,1)*t
 				t = t - lr*grad_t
 				c = c - lr*grad_c
-			print("grad_c = ", grad_c.min(), " -- ", grad_c.max())
-
-	def trainWord(self, wordId, contextIds, negativeIds):
-		alpha = 0.1
-		t = self.target[wordId]
-
-		c = np.dot(self.one_hot[contextIds], self.context)
-		n = np.zeros((len(c), self.negativeRate, self.nEmbed))
-					
-		for i in range(len(c)):
-			n[i,:,:] = self.context[negativeIds[i]]
-		
-		
-		k = self.nEmbed
-		l = len(c)
-		m = self.negativeRate
-		# compute the grad
-		v_ct = -( 1-expit(alpha*np.dot(c,t)) )
-		v_nt = 1 - expit( -alpha*np.dot( t, n.reshape((l,k,-1)) ) )
-		grad_c = v_ct.reshape(-1,1)*t.reshape(1,-1)
-		grad_t = np.dot(v_ct, c) + np.sum(np.einsum('ij,ijk->jk', v_nt,n), 0)
-		
-		# update weights
-		self.context[contextIds] = c - self.learn_rate*alpha*grad_c
-		self.target[wordId] = t - self.learn_rate*alpha*grad_t
-
-		# compute the loss
-		# loss = np.log( 1 + np.exp(-np.dot(c,t)) ) + np.sum( np.log( 1 + np.exp(np.dot(t,n.T)) ) )
-		self.accLoss += 0
 
 	def save(self,path):
 		with open(path, 'wb') as output:
