@@ -170,9 +170,8 @@ class SkipGram:
 			t=time()
 			for counter, sentence in enumerate(self.trainset):
 				wIdxs, ctxtIds, negativeIds = self.get_train_data(sentence)
-				print(len(wIdxs), len(ctxtIds), len(negativeIds))
 				# train all the target-context words at once
-				# self.trainWord(wIdxs, ctxtIds, negativeIds)
+				self.trainSentence(wIdxs, ctxtIds, negativeIds)
 				# self.trainWords += len(ctxtIds)
 
 				if counter % 1000 == 0:
@@ -184,6 +183,28 @@ class SkipGram:
 			print("time : %f"%(e-t))
 			
 			self.learn_rate = 1/( ( 1+self.learn_rate*(1+ne) ) ) 
+
+	def trainSentence(self, wordIds, contextIds, negativeIds):
+		k = self.nEmbed
+		m = self.negativeRate
+		lr = self.learn_rate
+
+		for pos, wIdx in enumerate(wordIds): # foreach word train epoch
+			l = len(contextIds[pos])
+			t = self.target[wIdx]
+			c = self.context[contextIds[pos]]
+			n = np.array([self.context[e] for e in negativeIds[pos]])
+			
+			for _ in range(10):
+				v_ct = expit(np.dot(c,t))
+				v_nt = expit(-np.dot(n,t))
+				loss = -np.sum(np.log(v_ct) + np.sum(np.log(v_nt),1))
+
+				grad_t = np.sum( (v_ct - 1).reshape(l,1)*c + np.sum( (1 - v_nt).reshape(l,m,1)*n, 1), 0)
+				grad_c = v_ct.reshape(l,1)*t
+				t = t - lr*grad_t
+				c = c - lr*grad_c
+			print("grad_c = ", grad_c.min(), " -- ", grad_c.max())
 
 	def trainWord(self, wordId, contextIds, negativeIds):
 		alpha = 0.1
