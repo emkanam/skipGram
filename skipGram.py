@@ -6,19 +6,72 @@ import pandas as pd
 import numpy as np
 from scipy.special import expit
 from sklearn.preprocessing import normalize
-import spacy
 from time import time
 import pickle
-from scipy.spatial.distance import cosine
-from numpy.linalg import norm
-from sklearn.preprocessing import scale
+from numpy.linalg import norm # for computing similarity
+from multiprocessing import Pool, Process, Queue # for multiprocessing
+import string
 
 import warnings
 warnings.filterwarnings("error")
+from functools import partial
 
 
 __authors__ = ['Mewe-Hezoudah KAHANAM','Mouad BOUCHATTAOUI']
 __emails__  = ['mewe-hezoudah.kahanam@student.ecp.fr','mouad.bouchattaoui@student.ecp.fr']
+
+translator = str.maketrans('', '', string.punctuation)
+
+def get_neg_sample(negativeRate, omit, vocab, vocab_pert):
+	v_size = len(vocab)
+
+	vocab_pert += np.sum(vocab_pert[omit]) / (v_size - len(omit))
+	vocab_pert[omit] = 0
+
+	return np.random.choice(v_size, size=negativeRate, replace=False, p=vocab_pert)
+
+
+def sentences_2data(sentences, negativeRate, winSize, vocab, vocab_id, vocab_pert):
+	data = []
+	for sentence in sentences:
+		wIds = list()
+		negativeIds = list()
+		ctxtIds = list()
+		for wpos, word in enumerate(sentence):
+			wIdx = vocab_id[word]
+			winsize = np.random.randint(winSize//2) + 1
+			start = max(0, wpos - winsize)
+			end = min(wpos + winsize + 1, len(sentence))
+			ctxtIds_ = [ vocab_id[w] for w in sentence[start:end] if vocab_id[w] != wIdx ]
+			if len(ctxtIds_) == 0: continue # avoid sentences with all <unk>
+			wIds.append(wIdx)
+			negativeIds.append([get_neg_sample(negativeRate, [wIdx, ctxtId], vocab, vocab_pert) for ctxtId in ctxtIds_])
+			ctxtIds.append(ctxtIds_)
+		data.append([wIds, ctxtIds, negativeIds])
+	return data
+
+
+def get_train_data(sentences, negativeRate, winSize, vocab, vocab_id, vocab_pert, n_jobs=3):
+	n = len(sentences)
+	result = []
+
+	for i in range(0, n, 1000):
+		t = time()
+		data = sentences[i:i+1000]
+
+		chunks = []
+		for j in range(n_jobs):
+			chunk = data[j::n_jobs]
+			chunks += [(chunk, negativeRate, winSize, vocab, vocab_id, vocab_pert)]
+		pool = Pool(processes=n_jobs)
+		res = pool.starmap(sentences_2data, chunks)
+		pool.close()
+		result += sum(res, [])
+		
+		e = time() - t
+		print("> loaded %d of %d in %.4f(s)"% (i+1000, n, e) )
+	print(len(result))
+	return result
 
 # decorator for printing code execution time
 def executionTime(input_func):
@@ -30,29 +83,65 @@ def executionTime(input_func):
 		return result
 	return wrapper
 
+
+def tokenize(lines):
+	docs = []
+	for l in lines:
+		doc = l.lower().translate(translator)
+		docs.append(doc.split())
+	return docs
+
+
 @executionTime
-def text2sentences(path):
-	nlp = spacy.load("en_core_web_sm")
+def text2sentences(path, n_jobs=3):
 	# feel free to make a better tokenization/pre-processing
-	sentences = []
 	with open(path) as f:
 		lines = f.readlines()
-		# for l in f:
-		# 	st = time()
-		# 	doc = nlp(l.lower())
-		# 	# no_punc_sentence = [token.orth_ for token in doc if not token.is_punct | token.is_space]
-		# 	no_punc_sentence = filter(lambda token : not(token.is_punct or token.is_space), doc)
-		# 	# no_punc_sentence = map(lambda token : token.orth_, no_punc_sentence)
-		# 	sentences.append( tuple(no_punc_sentence) )
-		# 	ed = time()
-		# 	print(ed - st)
-	# this approche increases speed by 10s
-	for l in lines:
-		doc = nlp(l.lower())
-		no_punc_sentence = [token.orth_ for token in doc if not token.is_punct | token.is_space]
-		sentences.append(tuple(no_punc_sentence))
+	
+	# this approche increases speed
+	chunks = [lines[i::n_jobs] for i in range(n_jobs)]
+	pool = Pool(processes=n_jobs)
+
+	sentences = pool.map(tokenize, chunks)
+	pool.close() # close the processes
+	sentences = sum(sentences, []) # merge the results of all processes
 	
 	return sentences
+
+
+def count_word(sentences):
+	all_sentences = sum(sentences, ())
+	
+	return all_sentences
+
+@executionTime
+def get_vocab(sentences, minCount=5):
+	counts = {}
+
+	for sentence in sentences:
+		for word in sentence:
+			try:
+				counts[word] += sentence.count(word)
+			except:
+				counts[word] = sentence.count(word)
+	vocab = {}
+	n_unk = 0
+	for word in counts:
+		if counts[word] > minCount:
+			vocab[word] = counts[word]
+		else:
+			n_unk += counts[word]
+	
+	vocab['<unk>'] = n_unk
+	return vocab
+
+@executionTime
+def get_scores(counts):
+	alpha = 0.75
+	scores = {word: counts[word]**alpha for word in counts.keys()}
+	n = sum(scores.values())
+	scores = {word: scores[word]/n for word in scores.keys()}
+	return scores
 
 def loadPairs(path):
 	data = pd.read_csv(path, delimiter='\t')
@@ -61,126 +150,109 @@ def loadPairs(path):
 
 
 class SkipGram:
-	def __init__(self, sentences, nEmbed=100, negativeRate=5, winSize = 5, minCount = 5):
+	def __init__(self, sentences, nEmbed=100, negativeRate=5, winSize=5, minCount=5):
 		self.winSize = winSize
 		self.negativeRate = negativeRate
 		self.nEmbed = nEmbed
-		# setting values
-		self.vocab = ['<unk>'] # list of valid words
-		list_words = sum(sentences, ())
-		for word in set(list_words):
-			if list_words.count(word) > minCount:
-				self.vocab.append(word)
-		
-		# model words that are less than minCount as <unk>
-		vocab_filter = lambda word: word if word in self.vocab else '<unk>'
-		self.trainset = {tuple(map(vocab_filter, sentence)) for sentence in sentences} # set of sentences
-		
+		# setting the training data
+		counts = get_vocab(sentences, minCount=minCount)
+		# training words dictionnary
+		self.vocab = list(counts.keys())
 		# word to ID mapping
 		self.w2id = {word: counter for (counter, word) in enumerate(self.vocab)}
+		# distribution for negative sampling
+		scores = get_scores(counts)
+		self.scores = np.array([scores[word] for word in self.vocab])
 
-		# create score for words (speeds up the sampling function)
-		alpha = 0.75
-		counts = np.zeros(len(self.vocab))
-		for word in self.vocab:
-			word_idx = self.w2id[word]
-			count_map = map(lambda sentence: sentence.count(word), self.trainset)
-			counts[word_idx] = sum(count_map)
-		self.scores = np.power(counts, alpha) / np.sum(np.power(counts, alpha))
-	
-	def sample(self, omit):
-		"""samples negative words, ommitting those in set omit"""
-		omit = list(omit)
-		vocab_size = len(self.vocab)
+		# model words that are less than minCount as <unk>
+		# set of training sentences
+		self.trainset = []
+		for sentence in sentences:
+			for pos, word in enumerate(sentence):
+				try:
+					counts[word]
+				except:
+					sentence[pos] = '<unk>'
+			self.trainset.append(tuple(sentence))
 
-		scores = np.copy(self.scores)
-		scores += np.sum(scores[omit]) / (vocab_size - len(omit))
-		scores[omit] = 0
-
-		negative_words = np.random.choice(vocab_size, size=self.negativeRate, replace=False, p=scores)
-		return list(negative_words)
-
-	def train(self):
+	def initialize(self, low=-0.8, high=0.8, learn_rate=0.01):
+		self.learn_rate = learn_rate
 		self.trainWords = 0
 		self.accLoss = 0
 		self.loss = []
-		# initialize target and context matrices
-		vocab_size = len(self.vocab)
-		self.target = np.random.uniform(-0.8, 0.8, (vocab_size, self.nEmbed))
-		self.context = np.random.uniform(-0.8, 0.8, (vocab_size, self.nEmbed))
-		# self.target = np.random.random_sample(size=(vocab_size, self.nEmbed))
-		# self.context = np.random.random_sample(size=(vocab_size, self.nEmbed))
-		# self.target = normalize(self.target, norm='max', axis=1)
-		# self.context = normalize(self.context, norm='max', axis=1)
 
-		for counter, sentence in enumerate(self.trainset):
-			sentence = list(map(lambda word: word if word in self.vocab else '<unk>', sentence))
+		# initialize variables for training process
+		v_size = len(self.vocab)
+		self.target = np.random.uniform(low, high, (v_size, self.nEmbed))
+		self.context = np.random.uniform(low, high, (v_size, self.nEmbed))
 
-			for wpos, word in enumerate(sentence):
-				wIdx = self.w2id[word]
-				winsize = np.random.randint(self.winSize) + 1
-				start = max(0, wpos - winsize)
-				end = min(wpos + winsize + 1, len(sentence))
-				t=time()
-				for context_word in sentence[start:end]:
-					ctxtId = self.w2id[context_word]
-					if ctxtId == wIdx: continue
-					# train on n_epoch
-					for _ in range(20):
-						negativeIds = self.sample({wIdx, ctxtId})
-						self.trainWord(wIdx, ctxtId, negativeIds)
+	def train(self, learn_rate=0.01, low=-0.8, high=0.8, initialize=True):
+		# if we want to initialize the model parameters
+		if initialize:
+			self.initialize(low=low, high=high, learn_rate=learn_rate)
+
+		train_data = get_train_data(self.trainset, self.negativeRate, self.winSize, self.vocab, self.w2id, self.scores, n_jobs=3)
+		# train the corpus
+		for epoch in range(4):
+			print("Epoch ", epoch)
+			t=time()
+			for counter, data in enumerate(train_data):
+				wIds, ctxtIds, negativeIds = data
+				for pos, wIdx in enumerate(wIds):
+
+					for cpos, ctxtId in enumerate(ctxtIds[pos]):
+						nIds = negativeIds[pos][cpos]
+						self.trainWord(wIdx, ctxtId, nIds)
 						self.trainWords += 1
-				e = time()
-				print("time : %f"%(e-t))
 
-			if counter % 1000 == 0:
-				print(' > training %d of %d' % (counter, len(self.trainset)))
-				self.loss.append(self.accLoss / self.trainWords)
-				self.trainWords = 0
-				self.accLoss = 0.
+				if counter % 1000 == 999:
+					print(' > training %d of %d' % (counter, len(self.trainset)))
+					self.loss.append(self.accLoss / self.trainWords)
+					self.trainWords = 0
+					self.accLoss = 0.
+					print("time = ", time() - t)
+					t = time()
+			print(self.loss)
+			self.trainWords = 0
+			self.accLoss = 0
+			self.loss = []
 
 	def trainWord(self, wordId, contextId, negativeIds):
-		learn_rate = 0.01
 		c = self.context[contextId]
-		t = self.target[wordId]
 		n = self.context[negativeIds]
-		
-		# compute the loss
-		loss = np.log( 1 + np.exp(-np.dot(c,t)) ) + np.sum( np.log( 1 + np.exp(np.dot(t,n.T)) ) )
-		self.accLoss += loss
-		# compute the grad
-		grad_c = -(1-expit(np.dot(c,t)))*t
-		grad_t = -((1-expit(np.dot(c,t)))*c + np.sum( (1 - expit(-np.dot(t,n.T)))*n.T, 1))
-		# print(grad_c)
-		# update weights
-		self.context[contextId] = c - learn_rate*grad_c
-		self.target[wordId] = t - learn_rate*grad_t
+		t = self.target[wordId]
+
+		grad_c = (expit(np.dot(c,t)) - 1)*t
+		grad_n = expit(np.dot(n,t)).reshape(-1,1)*t
+		grad_t = (expit(np.dot(c,t)) - 1)*c + np.sum(expit(np.dot(n,t)).reshape(-1,1)*n, 0)
+
+		self.context[contextId] -= self.learn_rate*grad_c
+		self.context[negativeIds] -= self.learn_rate*grad_n
+		self.target[wordId] -= self.learn_rate*grad_t
+
+		self.accLoss += -( np.log( expit(np.dot(c,t)) ) + np.sum(np.log( expit(-np.dot(n,t)) )) )
+		pass
 
 	def save(self,path):
 		with open(path, 'wb') as output:
 			pickle.dump(self, output, pickle.HIGHEST_PROTOCOL)
-
+		
 	def similarity(self,word1,word2):
-		"""
-		computes similiarity between the two words. unknown words are mapped to one common vector
-		:param word1:
-		:param word2:
-		:return: a float \in [0,1] indicating the similarity (the higher the more similar)
-		"""
+		# create a function to get word id return id of <unk> if word not in vocab
 		word_id = lambda word: self.w2id[word] if word in self.vocab else self.w2id['<unk>']
-		# get the ids
-		word1_id = word_id(word1)
-		word2_id = word_id(word2)
-		embed1 = self.target[word1_id]
-		embed2 = self.target[word2_id]
 
-		score = np.dot(embed1, embed2) / (norm(embed1) * norm(embed2))
+		# get the embeddings
+		w1 = self.target[word_id(word1)]
+		w2 = self.target[word_id(word2)]
+
+		score = np.dot(w1, w2) / (norm(w1) * norm(w2))
+		score = (score+1)*np.exp(score+1)/(2*np.exp(2))
 		score = round(score, 4)
 
-		# print("%s -- %s == %f"%(self.vocab[word1_id], self.vocab[word2_id], score))
-
+		# print(self.vocab[word_id(word1)], ' -- ', self.vocab[word_id(word2)], ' -- ', score)
+		
 		return score
-
+	
 	@staticmethod
 	def load(path):
 		with open(path, 'rb') as model_file:
@@ -199,7 +271,7 @@ if __name__ == '__main__':
 	if not opts.test:
 		sentences = text2sentences(opts.text)
 		sg = SkipGram(sentences)
-		sg.train()
+		sg.train(learn_rate=0.05)
 		sg.save(opts.model)
 
 	else:
