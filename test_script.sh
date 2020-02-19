@@ -13,7 +13,7 @@ BWC_URL=https://www.statmt.org/lm-benchmark/1-billion-word-language-modeling-ben
 TESTDATA=simlex.csv
 TRAINDATA=train.txt
 RESULTFILE=results.txt
-NLINES=100000 # number of lines, play around with increasing numbers
+NLINES=10000 # number of lines, play around with increasing numbers
 
 
 # download training text data
